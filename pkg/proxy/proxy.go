@@ -77,6 +77,11 @@ type CAFromFile struct {
 	CAFile string
 }
 
+type splitHttpTransport struct {
+	h1rt http.RoundTripper
+	h2rt http.RoundTripper
+}
+
 func (caFromFile CAFromFile) CurrentCABundleContent() []byte {
 	res, _ := ioutil.ReadFile(caFromFile.CAFile)
 	return res
@@ -265,6 +270,23 @@ func (p *Proxy) reviewToken(rw http.ResponseWriter, req *http.Request) bool {
 }
 
 func (p *Proxy) roundTripperForRestConfig(config *rest.Config) (http.RoundTripper, error) {
+	transp := splitHttpTransport{}
+
+	h2rt, err := rest.TransportFor(config)
+	if err != nil {
+		return nil, err
+	}
+	transp.h2rt = h2rt
+
+	configShallowCopy := *config
+	configShallowCopy.TLSClientConfig.NextProtos = []string{"http/1.1"}
+	h1rt, err := rest.TransportFor(&configShallowCopy)
+	if err != nil {
+		return nil, err
+	}
+	transp.h1rt = h1rt
+
+	return &transp, nil
 	// get golang tls config to the API server
 	tlsConfig, err := rest.TLSConfigFor(config)
 	if err != nil {
@@ -299,4 +321,15 @@ func (p *Proxy) OIDCTokenAuthenticator() authenticator.Token {
 
 func (p *Proxy) RunPreShutdownHooks() error {
 	return p.hooks.RunPreShutdownHooks()
+}
+
+func isUpgradeRequest(req *http.Request) bool {
+	return req.Header.Get("Connection") == "Upgrade" && req.Header.Get("Upgrade") != ""
+}
+
+func (t *splitHttpTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if isUpgradeRequest(req) {
+		return t.h1rt.RoundTrip(req)
+	}
+	return t.h2rt.RoundTrip(req)
 }
